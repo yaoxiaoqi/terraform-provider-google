@@ -20,11 +20,15 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	transport_tpg "github.com/hashicorp/terraform-provider-google/google/transport"
 )
+
+const gitDir = ".git"
 
 // SetLabels is called in the READ method of the resources to set
 // the field "labels" and "terraform_labels" in the state based on the labels field in the configuration.
@@ -119,10 +123,20 @@ func setLabelsFields(labelsField string, d *schema.ResourceDiff, meta interface{
 		}
 	}
 
+	commit_sha, err := getGitCommit()
+	if err != nil {
+		log.Printf("[DEBUG] SEVEN: Error getting git commit: %s", err)
+	} else {
+		terraformLabels["sdlc-test-commit"] = fmt.Sprintf("commit_sha_%s", commit_sha)
+		log.Printf("[DEBUG] SEVEN: Setting git commit sha label to: commit_sha_%s", commit_sha)
+	}
+
 	labels := raw.(map[string]interface{})
 	for k, v := range labels {
 		terraformLabels[k] = v.(string)
 	}
+
+	log.Printf("[DEBUG] SEVEN: Setting terraform_labels to: %#v", terraformLabels)
 
 	if err := d.SetNew("terraform_labels", terraformLabels); err != nil {
 		return fmt.Errorf("error setting new terraform_labels diff: %w", err)
@@ -294,4 +308,42 @@ func TerraformLabelsStateUpgrade(rawState map[string]interface{}) (map[string]in
 	log.Printf("[DEBUG] Attributes after migration terraform_labels: %#v", rawState["terraform_labels"])
 
 	return rawState, nil
+}
+
+// getGitCommit executes the 'git' command to get the current commit hash.
+func getGitCommit() (string, error) {
+	// Check if .git directory exists
+	if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+		return "", fmt.Errorf("can't find .git in the current directory")
+	}
+
+	headPath := filepath.Join(gitDir, "HEAD")
+	headBytes, err := os.ReadFile(headPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read HEAD file: %w", err)
+	}
+
+	headContent := strings.TrimSpace(string(headBytes))
+
+	// Check if HEAD is a symbolic reference (points to a branch)
+	if strings.HasPrefix(headContent, "ref: ") {
+		refPath := strings.TrimPrefix(headContent, "ref: ")
+		fullRefPath := filepath.Join(gitDir, refPath)
+		shaBytes, err := os.ReadFile(fullRefPath)
+		if err == nil {
+			// Found the SHA in the ref file.
+			commitSHA := strings.TrimSpace(string(shaBytes))
+			if len(commitSHA) >= 7 {
+				commitSHA = commitSHA[:7]
+			}
+			return commitSHA, nil
+		}
+		return "", fmt.Errorf("failed to read ref file %s: %w", fullRefPath, err)
+	} else {
+		// It's a detached HEAD. The content of HEAD is the SHA.
+		if len(headContent) >= 7 {
+			headContent = headContent[:7]
+		}
+		return headContent, nil
+	}
 }
